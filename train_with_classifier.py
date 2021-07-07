@@ -356,7 +356,7 @@ def train(args, classifier, clf_im_size, device):
     Na = 1.
     alpha = 0.
     beta = 1.
-    cycle_steps = 100
+    cycle_steps = args.cycle_steps
     N_dist = torch.ones(args.num_classes, requires_grad=False) * Na
     N_dist /= N_dist.sum()
     N_dist = N_dist.to(device)
@@ -430,7 +430,8 @@ def train(args, classifier, clf_im_size, device):
         netG.zero_grad()
         pred_g = netD(fake_images, "fake")
         #err_g = -pred_g.mean()
-        err_g = -pred_g.mean() + L_reg
+        _lambda = 1.
+        err_g = -pred_g.mean() + _lambda * L_reg
 
         err_g.backward()
         optimizerG.step()
@@ -478,6 +479,7 @@ if __name__ == "__main__":
     parser.add_argument('--iter', type=int, default=50000, help='number of iterations for GAN')
     parser.add_argument('--start_iter', type=int, default=0, help='the iteration to start training')
     parser.add_argument('--batch_size', type=int, default=8, help='mini batch number of images')
+    parser.add_argument('--cycle_steps', type=int, default=10, help='number of iterations between N_distribution updates')
     parser.add_argument('--im_size', type=int, default=256, help='image resolution')
     parser.add_argument('--ckpt', type=str, default='None', help='checkpoint weight path if have one')
 
@@ -507,7 +509,7 @@ if __name__ == "__main__":
     # These classifiers are the ones that make use of Average Pooling layer on first layers
     clf_im_size = args.im_size
     classifier, hist = tune_classifier(classifier=classifier, input_size=clf_im_size, data_dir=args.path,
-                                            device=device, batch_size=args.batch_size, num_epochs=1)
+                                            device=device, batch_size=args.batch_size, num_epochs=15)
     classifier.eval()
 
     train(args=args, classifier=classifier, clf_im_size=clf_im_size, device=device)
