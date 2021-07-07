@@ -197,13 +197,15 @@ def tune_classifier(classifier, input_size, data_dir, device, batch_size, num_ep
             transforms.RandomResizedCrop(input_size),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])            
+            #transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ]),
         'val': transforms.Compose([
             transforms.Resize(input_size),
             transforms.CenterCrop(input_size),
             transforms.ToTensor(),
-            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])            
+            #transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ]),
     }
 
@@ -268,7 +270,16 @@ def train_d(net, data, label="real"):
         err = F.relu( torch.rand_like(pred) * 0.2 + 0.8 + pred).mean()
         err.backward()
         return pred.mean().item()
-        
+
+
+def update_discrete_effective_class_distribution(N, C, alpha, beta):
+    # for every class we calculate the effective class frequency
+    for i in range(N.shape[0]):
+        N[i] = (1-alpha) * N[i] + beta * C[i]
+    # Normalize distribution
+    N = N / N.sum()
+    return N
+
 """
 TODO: add classifier to be used to generate a regularizer loss
 The important thing I need to consider is that G(noise) will generate images of dimension args.im_size
@@ -299,6 +310,7 @@ def train(args, classifier, clf_im_size, device):
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+#            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])            
         ]
     trans = transforms.Compose(transform_list)
     
@@ -339,9 +351,20 @@ def train(args, classifier, clf_im_size, device):
         current_iteration = int(checkpoint.split('_')[-1].split('.')[0])
         del ckpt
 
+    # some variables to handle classes stats in the loop
+    cycle = 0
+    Na = 1.
+    alpha = 0.
+    beta = 1.
+    cycle_steps = 100
+    N_dist = torch.ones(args.num_classes, requires_grad=False) * Na
+    N_dist /= N_dist.sum()
+    N_dist = N_dist.to(device)
+
     for iteration in tqdm(range(current_iteration, total_iterations+1)):
         real_image = next(dataloader)
-        real_image = real_image.cuda(non_blocking=True)
+        #real_image = real_image.cuda(non_blocking=True)
+        real_image = real_image.to(device, non_blocking=True)
         current_batch_size = real_image.size(0)
         noise = torch.Tensor(current_batch_size, nz).normal_(0, 1).to(device)
 
@@ -352,7 +375,50 @@ def train(args, classifier, clf_im_size, device):
 
         real_image = DiffAugment(real_image, policy=policy)
         fake_images = [DiffAugment(fake, policy=policy) for fake in fake_images]
+
+        ## Added by Kecol
+        if iteration % cycle_steps == 0:
+            # we cycle increment
+            cycle += 1
+
+            if iteration != current_iteration:
+                # we use previous N discrete class distribution and C to calculate a new N distribution
+                print('update discrete effecting class distribution')
+                N_dist = update_discrete_effective_class_distribution(N_dist, C, alpha, beta)
+                print(f'N_dist: {N_dist}')
+            else:
+                # we will use first defined N
+                pass                
+            print(f'new cycle t={cycle}')
+            # reset counter of classes
+            C = torch.zeros(args.num_classes, device=device)
+
+        pred_classes_log_softmax = classifier(fake_images[0])
+        pred_classes_softmax = torch.exp(pred_classes_log_softmax)
+        #print(pred_classes_softmax)
+        #print('batch softmax', pred_classes_softmax.shape)
         
+        # track of class statistics for later usage with class effective frequency distribution
+        batch_labels = torch.zeros(pred_classes_softmax.shape)
+        for j, idx in enumerate(pred_classes_softmax.argmax(1)):
+            batch_labels[j, idx] = 1
+    
+        batch_labels = batch_labels.to(device)
+        # update class counter
+        C += batch_labels.sum(0)
+        print('class counter:', C)
+        
+        print('N_dist', N_dist)
+        # this is Lreg calculation
+        rho = (pred_classes_softmax.mean(0) / batch_size) # .detach
+        print('rho:', rho)
+        print('log(rho):', torch.log(rho))
+        #print('rho . log(rho):', rho * torch.log(rho))
+        L_reg = ((rho * torch.log(rho)) / N_dist)
+        print('rho * torch.log(rho)) / N_dist', L_reg)
+        L_reg = L_reg.mean()
+        print(f'L_reg: {L_reg:.5f}')        
+
         ## 2. train Discriminator
         netD.zero_grad()
 
@@ -363,7 +429,8 @@ def train(args, classifier, clf_im_size, device):
         ## 3. train Generator
         netG.zero_grad()
         pred_g = netD(fake_images, "fake")
-        err_g = -pred_g.mean()
+        #err_g = -pred_g.mean()
+        err_g = -pred_g.mean() + L_reg
 
         err_g.backward()
         optimizerG.step()
@@ -404,7 +471,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--path', type=str, required=True, help='path of resource dataset, should be a folder that has one or many sub image folders inside')
     parser.add_argument('--num_classes', type=int, required=True, help='number of samples we expect to find in image folders')
-    parser.add_argument('--classifier', type=str, default='squeezenet', choices=classifiers, help='classifier base to fine tune')
+    parser.add_argument('--classifier', type=str, default='resnet', choices=classifiers, help='classifier base to fine tune')
     parser.add_argument('--feature_extract', type=str, default='True', help='Block classifier original weights before training')
     parser.add_argument('--cuda', type=int, default=0, help='index of gpu to use')
     parser.add_argument('--name', type=str, default='gan_clf_test_1', help='experiment name')
@@ -425,13 +492,22 @@ if __name__ == "__main__":
     classifier, input_size = initialize_classifier(args.classifier.lower(), args.num_classes, feature_extract, use_pretrained=True)
 
     # Print the model we just instantiated
-    print(classifier)
+    # print(classifier)
 
     # Detect if we have a GPU available
     device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu")
     print(f'Device to be used: {device}')
 
-    classifier, hist = tune_classifier(classifier=classifier, input_size=input_size, data_dir=args.path,
-                                            device=device, batch_size=args.batch_size, num_epochs=15)
+    # if we use the classifier original input size then later we will require to resize the output of the generator
+    # to be able of classifying the images (generator output)
+    # clf_im_size = input_size
+    # but for the experiment we can try training the classifier with generator output size
+    # (when using im_size = 256 will be not so much different of original classifier input size 224)
+    # I don't remember all the classifiers that can handle dynamic image sizes
+    # These classifiers are the ones that make use of Average Pooling layer on first layers
+    clf_im_size = args.im_size
+    classifier, hist = tune_classifier(classifier=classifier, input_size=clf_im_size, data_dir=args.path,
+                                            device=device, batch_size=args.batch_size, num_epochs=1)
+    classifier.eval()
 
-    train(args=args, classifier=classifier, clf_im_size=input_size, device=device)
+    train(args=args, classifier=classifier, clf_im_size=clf_im_size, device=device)
