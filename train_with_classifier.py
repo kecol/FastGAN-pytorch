@@ -353,13 +353,14 @@ def train(args, classifier, clf_im_size, device):
 
     # some variables to handle classes stats in the loop
     cycle = 0
-    Na = 1.
-    alpha = 0.
-    beta = 1.
+    Na = 1.     # constant to initialize N distribution at t=0
+    alpha = 0.  # how much of the past we want to keep     (this should be 0.5 for good results)
+    beta = 1.   # how much of the present we want to keep  (this should be 1.0 for good results)
     cycle_steps = args.cycle_steps
     N_dist = torch.ones(args.num_classes, requires_grad=False) * Na
     N_dist /= N_dist.sum()
     N_dist = N_dist.to(device)
+    _lambda = args.lreg_lambda
 
     for iteration in tqdm(range(current_iteration, total_iterations+1)):
         real_image = next(dataloader)
@@ -430,7 +431,6 @@ def train(args, classifier, clf_im_size, device):
         netG.zero_grad()
         pred_g = netD(fake_images, "fake")
         #err_g = -pred_g.mean()
-        _lambda = 1.
         err_g = -pred_g.mean() + _lambda * L_reg
 
         err_g.backward()
@@ -473,6 +473,7 @@ if __name__ == "__main__":
     parser.add_argument('--path', type=str, required=True, help='path of resource dataset, should be a folder that has one or many sub image folders inside')
     parser.add_argument('--num_classes', type=int, required=True, help='number of samples we expect to find in image folders')
     parser.add_argument('--classifier', type=str, default='resnet', choices=classifiers, help='classifier base to fine tune')
+    parser.add_argument('--lreg_lambda', type=float, default=1. , help='Used in loss as: lambda X Lreg')
     parser.add_argument('--feature_extract', type=str, default='True', help='Block classifier original weights before training')
     parser.add_argument('--cuda', type=int, default=0, help='index of gpu to use')
     parser.add_argument('--name', type=str, default='gan_clf_test_1', help='experiment name')
