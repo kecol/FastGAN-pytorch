@@ -24,9 +24,10 @@ from diffaug import DiffAugment
 policy = 'color,translation'
 import lpips
 percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
+
 #torch.backends.cudnn.benchmark = True
 
-def train_classifier(model, dataloaders, criterion, optimizer, num_epochs=25, is_inception=False):
+def train_classifier(model, dataloaders, criterion, optimizer, device, num_epochs=25, is_inception=False):
     """
     Train the model that will be used later with GAN generated images to estimate at different times
     the GAN's discrete distribution frequencies of the classes.
@@ -236,14 +237,11 @@ def tune_classifier(classifier, input_size, data_dir, device, batch_size, num_ep
     # Setup the loss fxn
     criterion = nn.CrossEntropyLoss()
     # Train and evaluate
-    classifier, hist = train_classifier(classifier, dataloaders_dict, criterion, optimizer,
+    classifier, hist = train_classifier(classifier, dataloaders_dict, criterion, optimizer, device,
                                 num_epochs=num_epochs, is_inception=(args.classifier.lower()=="inception"))
 
     return classifier, hist
 
-###
-### GAN: original train.py
-###
 def crop_image_by_part(image, part):
     hw = image.shape[2]//2
     if part==0:
@@ -287,7 +285,7 @@ but the classifier knows how to classify images of dimension clf_im_size.
 So I will need to use one more transform operation to do that.
 
 """
-def train(args, classifier, clf_im_size, device):
+def train(args, classifier, clf_im_size, devices):
 
     data_root = args.path
     total_iterations = args.iter
@@ -299,7 +297,7 @@ def train(args, classifier, clf_im_size, device):
     nz = 256
     nlr = 0.0002
     nbeta1 = 0.5
-    multi_gpu = False
+    multi_gpu = len(devices) > 1
     dataloader_workers = 8
     current_iteration = 0
     save_interval = 100
@@ -327,16 +325,19 @@ def train(args, classifier, clf_im_size, device):
     netD = Discriminator(ndf=ndf, im_size=im_size)
     netD.apply(weights_init)
 
-    netG.to(device)
-    netD.to(device)
+    netG.to(devices[0])
+    netD.to(devices[0])
+    classifier.to(devices[0])
 
     avg_param_G = copy_G_params(netG)
 
-    fixed_noise = torch.FloatTensor(8, nz).normal_(0, 1).to(device)
+    fixed_noise = torch.FloatTensor(8, nz).normal_(0, 1).to(devices[0])
 
     if multi_gpu:
-        netG = nn.DataParallel(netG.cuda())
-        netD = nn.DataParallel(netD.cuda())
+        print('Using models with DataParallel')
+        netG = nn.DataParallel(netG, device_ids=devices)
+        netD = nn.DataParallel(netD, device_ids=devices)
+        classifier = nn.DataParallel(classifier, device_ids=devices)
 
     optimizerG = optim.Adam(netG.parameters(), lr=nlr, betas=(nbeta1, 0.999))
     optimizerD = optim.Adam(netD.parameters(), lr=nlr, betas=(nbeta1, 0.999))
@@ -354,20 +355,20 @@ def train(args, classifier, clf_im_size, device):
     # some variables to handle classes stats in the loop
     cycle = 0
     Na = 1.     # constant to initialize N distribution at t=0
-    alpha = 0.  # how much of the past we want to keep     (this should be 0.5 for good results)
+    alpha = 0.5 # how much of the past we want to keep     (this should be 0.5 for good results)
     beta = 1.   # how much of the present we want to keep  (this should be 1.0 for good results)
     cycle_steps = args.cycle_steps
     N_dist = torch.ones(args.num_classes, requires_grad=False) * Na
     N_dist /= N_dist.sum()
-    N_dist = N_dist.to(device)
+    N_dist = N_dist.to(devices[0])
     _lambda = args.lreg_lambda
 
     for iteration in tqdm(range(current_iteration, total_iterations+1)):
         real_image = next(dataloader)
         #real_image = real_image.cuda(non_blocking=True)
-        real_image = real_image.to(device, non_blocking=True)
+        real_image = real_image.to(devices[0], non_blocking=True)
         current_batch_size = real_image.size(0)
-        noise = torch.Tensor(current_batch_size, nz).normal_(0, 1).to(device)
+        noise = torch.Tensor(current_batch_size, nz).normal_(0, 1).to(devices[0])
 
         fake_images = netG(noise)
         # len of fake_images is 2
@@ -392,7 +393,7 @@ def train(args, classifier, clf_im_size, device):
                 pass                
             print(f'new cycle t={cycle}')
             # reset counter of classes
-            C = torch.zeros(args.num_classes, device=device)
+            C = torch.zeros(args.num_classes, device=devices[0])
 
         pred_classes_log_softmax = classifier(fake_images[0])
         pred_classes_softmax = torch.exp(pred_classes_log_softmax)
@@ -404,7 +405,7 @@ def train(args, classifier, clf_im_size, device):
         for j, idx in enumerate(pred_classes_softmax.argmax(1)):
             batch_labels[j, idx] = 1
     
-        batch_labels = batch_labels.to(device)
+        batch_labels = batch_labels.to(devices[0])
         # update class counter
         C += batch_labels.sum(0)
         print('class counter:', C)
@@ -468,6 +469,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Region GAN with help of a classifier')
 
+    # I'm sure resnet and vgg will work with different input sizes but I'm not sure about the rest
     classifiers = ['squeezenet', 'resnet', 'alexnet', 'vgg', 'densenet', 'inception']
 
     parser.add_argument('--path', type=str, required=True, help='path of resource dataset, should be a folder that has one or many sub image folders inside')
@@ -475,7 +477,7 @@ if __name__ == "__main__":
     parser.add_argument('--classifier', type=str, default='resnet', choices=classifiers, help='classifier base to fine tune')
     parser.add_argument('--lreg_lambda', type=float, default=1. , help='Used in loss as: lambda X Lreg')
     parser.add_argument('--feature_extract', type=str, default='True', help='Block classifier original weights before training')
-    parser.add_argument('--cuda', type=int, default=0, help='index of gpu to use')
+    parser.add_argument('--cuda', type=str, default='0', help='indices of GPUs to be used')
     parser.add_argument('--name', type=str, default='gan_clf_test_1', help='experiment name')
     parser.add_argument('--iter', type=int, default=50000, help='number of iterations for GAN')
     parser.add_argument('--start_iter', type=int, default=0, help='the iteration to start training')
@@ -498,8 +500,19 @@ if __name__ == "__main__":
     # print(classifier)
 
     # Detect if we have a GPU available
-    device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu")
-    print(f'Device to be used: {device}')
+    if ',' in args.cuda:
+        cudas = args.cuda.split(',')
+    elif ' ' in args.cuda:
+         cudas = args.cuda.split(' ')
+    else:
+        cudas = [args.cuda]
+    cudas = [int(c) for c in cudas]
+
+    print(f"Devices we will try to use: {cudas}")
+    if not torch.cuda.is_available():
+        print('The script requires at least one GPU')
+        sys.exit(1)
+    print(f'Device to be used to fine tune the classifier: {cudas[0]}')
 
     # if we use the classifier original input size then later we will require to resize the output of the generator
     # to be able of classifying the images (generator output)
@@ -510,7 +523,7 @@ if __name__ == "__main__":
     # These classifiers are the ones that make use of Average Pooling layer on first layers
     clf_im_size = args.im_size
     classifier, hist = tune_classifier(classifier=classifier, input_size=clf_im_size, data_dir=args.path,
-                                            device=device, batch_size=args.batch_size, num_epochs=15)
+                                            device=cudas[0], batch_size=args.batch_size, num_epochs=15)
     classifier.eval()
 
-    train(args=args, classifier=classifier, clf_im_size=clf_im_size, device=device)
+    train(args=args, classifier=classifier, clf_im_size=clf_im_size, devices=cudas)
