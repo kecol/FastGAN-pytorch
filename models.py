@@ -308,7 +308,7 @@ class Discriminator(nn.Module):
             if part==3:
                 rec_img_part = self.decoder_part(feat_32[:,:,8:,8:])
 
-            return torch.cat([rf_0, rf_1]) , [rec_img_big, rec_img_small, rec_img_part], part 
+            return torch.cat([rf_0, rf_1]) , [rec_img_big, rec_img_small, rec_img_part], torch.Tensor([part])
 
         return torch.cat([rf_0, rf_1]) 
 
