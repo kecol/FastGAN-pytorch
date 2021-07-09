@@ -388,6 +388,11 @@ def train(args, classifier, clf_im_size, devices):
                 print('update discrete effecting class distribution')
                 N_dist = update_discrete_effective_class_distribution(N_dist, C, alpha, beta)
                 print(f'N_dist: {N_dist}')
+                if args.dynamic_lambda.lower() in ['true', '1']:
+                    #
+                    # TODO: recalculate _lambda
+                    # lambda = 1 / sum(e^N)
+                    _lambda = 1. / torch.sum(torch.exp(N_dist))
             else:
                 # we will use first defined N
                 pass                
@@ -419,6 +424,7 @@ def train(args, classifier, clf_im_size, devices):
         L_reg = ((rho * torch.log(rho)) / N_dist)
         print('rho * torch.log(rho)) / N_dist', L_reg)
         L_reg = L_reg.mean()
+        print('_lambda:', _lambda)
         print(f'L_reg: {L_reg:.5f}')        
 
         ## 2. train Discriminator
@@ -432,7 +438,7 @@ def train(args, classifier, clf_im_size, devices):
         netG.zero_grad()
         pred_g = netD(fake_images, "fake")
         #err_g = -pred_g.mean()
-        err_g = -pred_g.mean() + _lambda * L_reg
+        err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
 
         err_g.backward()
         optimizerG.step()
@@ -476,6 +482,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_classes', type=int, required=True, help='number of samples we expect to find in image folders')
     parser.add_argument('--classifier', type=str, default='resnet', choices=classifiers, help='classifier base to fine tune')
     parser.add_argument('--lreg_lambda', type=float, default=1. , help='Used in loss as: lambda X Lreg')
+    parser.add_argument('--dynamic_lambda', type=str, default='False', help='Lambda will be calculated automatically after each cycle when True')
     parser.add_argument('--feature_extract', type=str, default='True', help='Block classifier original weights before training')
     parser.add_argument('--cuda', type=str, default='0', help='indices of GPUs to be used')
     parser.add_argument('--name', type=str, default='gan_clf_test_1', help='experiment name')
