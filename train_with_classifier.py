@@ -391,8 +391,11 @@ def train(args, classifier, clf_im_size, devices):
                 if args.dynamic_lambda.lower() in ['true', '1']:
                     #
                     # TODO: recalculate _lambda
+                    print('dynamic lambda')
                     # lambda = 1 / sum(e^N)
                     _lambda = 1. / torch.sum(torch.exp(N_dist))
+                else:
+                    print('args.dynamic_lambda:', args.dynamic_lambda)
             else:
                 # we will use first defined N
                 pass                
