@@ -268,7 +268,7 @@ class Discriminator(nn.Module):
         self.decoder_part = SimpleDecoder(nfc[32], nc)
         self.decoder_small = SimpleDecoder(nfc[32], nc)
         
-    def forward(self, imgs, label):
+    def forward(self, imgs, label, part=-1):
         if type(imgs) is not list:
             imgs = [F.interpolate(imgs, size=self.im_size), F.interpolate(imgs, size=128)]
 
@@ -297,7 +297,7 @@ class Discriminator(nn.Module):
             rec_img_big = self.decoder_big(feat_last)
             rec_img_small = self.decoder_small(feat_small)
 
-            part = random.randint(0, 3)
+            assert part in [0, 1, 2, 3]
             rec_img_part = None
             if part==0:
                 rec_img_part = self.decoder_part(feat_32[:,:,:8,:8])
@@ -308,8 +308,7 @@ class Discriminator(nn.Module):
             if part==3:
                 rec_img_part = self.decoder_part(feat_32[:,:,8:,8:])
 
-            return torch.cat([rf_0, rf_1]) , [rec_img_big, rec_img_small, rec_img_part], torch.Tensor([part])
-
+            return torch.cat([rf_0, rf_1]) , [rec_img_big, rec_img_small, rec_img_part]
         return torch.cat([rf_0, rf_1]) 
 
 

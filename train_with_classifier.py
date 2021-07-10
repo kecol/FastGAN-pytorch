@@ -256,7 +256,8 @@ def crop_image_by_part(image, part):
 def train_d(net, data, label="real"):
     """Train function of discriminator"""
     if label=="real":
-        pred, [rec_all, rec_small, rec_part], part = net(data, label)
+        part = np.random.randint(0, 3)
+        pred, [rec_all, rec_small, rec_part] = net(data, label, part)
         err = F.relu(  torch.rand_like(pred) * 0.2 + 0.8 -  pred).mean() + \
             percept( rec_all, F.interpolate(data, rec_all.shape[2]) ).sum() +\
             percept( rec_small, F.interpolate(data, rec_small.shape[2]) ).sum() +\
@@ -279,11 +280,11 @@ def update_discrete_effective_class_distribution(N, C, alpha, beta):
     return N
 
 """
-TODO: add classifier to be used to generate a regularizer loss
-The important thing I need to consider is that G(noise) will generate images of dimension args.im_size
+We added a classifier in the loop to be used for the loss regularizer
+The important thing we need to consider is that G(noise) will generate images of dimension args.im_size
 but the classifier knows how to classify images of dimension clf_im_size.
-So I will need to use one more transform operation to do that.
-
+TODO: we will need to use one more transform operation to do that.
+IMPORTANT: some image classifiers can work with variable input size like vgg or resnet
 """
 def train(args, classifier, clf_im_size, devices):
 
@@ -378,7 +379,6 @@ def train(args, classifier, clf_im_size, devices):
         real_image = DiffAugment(real_image, policy=policy)
         fake_images = [DiffAugment(fake, policy=policy) for fake in fake_images]
 
-        ## Added by Kecol
         if iteration % cycle_steps == 0:
             # we cycle increment
             cycle += 1
@@ -403,33 +403,6 @@ def train(args, classifier, clf_im_size, devices):
             # reset counter of classes
             C = torch.zeros(args.num_classes, device=devices[0])
 
-        pred_classes_log_softmax = classifier(fake_images[0])
-        pred_classes_softmax = torch.exp(pred_classes_log_softmax)
-        #print(pred_classes_softmax)
-        #print('batch softmax', pred_classes_softmax.shape)
-        
-        # track of class statistics for later usage with class effective frequency distribution
-        batch_labels = torch.zeros(pred_classes_softmax.shape)
-        for j, idx in enumerate(pred_classes_softmax.argmax(1)):
-            batch_labels[j, idx] = 1
-    
-        batch_labels = batch_labels.to(devices[0])
-        # update class counter
-        C += batch_labels.sum(0)
-        print('class counter:', C)
-        
-        print('N_dist', N_dist)
-        # this is Lreg calculation
-        rho = (pred_classes_softmax.mean(0) / batch_size) # .detach
-        print('rho:', rho)
-        print('log(rho):', torch.log(rho))
-        #print('rho . log(rho):', rho * torch.log(rho))
-        L_reg = ((rho * torch.log(rho)) / N_dist)
-        print('rho * torch.log(rho)) / N_dist', L_reg)
-        L_reg = L_reg.mean()
-        print('_lambda:', _lambda)
-        print(f'L_reg: {L_reg:.5f}')        
-
         ## 2. train Discriminator
         netD.zero_grad()
 
@@ -439,12 +412,25 @@ def train(args, classifier, clf_im_size, devices):
         
         ## 3. train Generator
         netG.zero_grad()
-        pred_g = netD(fake_images, "fake")
-        #err_g = -pred_g.mean()
+        pred_g = netD(fake_images, "fake")        
+        # Lreg calculation
+        pred_classes_softmax = torch.exp(classifier(fake_images[0]))
+        rho = (pred_classes_softmax.mean(0) / batch_size)
+        L_reg = ((rho * torch.log(rho)) / N_dist).mean()
+        print('t:', cycle, 'class counter:', C.tolist(), 'N_dist:', N_dist.tolist(), f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}')
         err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
 
         err_g.backward()
         optimizerG.step()
+
+        # track of class statistics for later usage with class effective frequency distribution
+        batch_labels = torch.zeros(pred_classes_softmax.shape)
+        for j, idx in enumerate(pred_classes_softmax.argmax(1)):
+            batch_labels[j, idx] = 1
+    
+        batch_labels = batch_labels.to(devices[0])
+        # update class counter
+        C += batch_labels.sum(0)
 
         for p, avg_p in zip(netG.parameters(), avg_param_G):
             avg_p.mul_(0.999).add_(0.001 * p.data)
@@ -484,6 +470,7 @@ if __name__ == "__main__":
     parser.add_argument('--path', type=str, required=True, help='path of resource dataset, should be a folder that has one or many sub image folders inside')
     parser.add_argument('--num_classes', type=int, required=True, help='number of samples we expect to find in image folders')
     parser.add_argument('--classifier', type=str, default='resnet', choices=classifiers, help='classifier base to fine tune')
+    parser.add_argument('--epochs', type=int, default=15, help='epochs to finetune the classifier')
     parser.add_argument('--lreg_lambda', type=float, default=1. , help='Used in loss as: lambda X Lreg')
     parser.add_argument('--dynamic_lambda', type=str, default='False', help='Lambda will be calculated automatically after each cycle when True')
     parser.add_argument('--feature_extract', type=str, default='True', help='Block classifier original weights before training')
@@ -533,7 +520,7 @@ if __name__ == "__main__":
     # These classifiers are the ones that make use of Average Pooling layer on first layers
     clf_im_size = args.im_size
     classifier, hist = tune_classifier(classifier=classifier, input_size=clf_im_size, data_dir=args.path,
-                                            device=cudas[0], batch_size=args.batch_size, num_epochs=15)
+                                            device=cudas[0], batch_size=args.batch_size, num_epochs=args.epochs)
     classifier.eval()
 
     train(args=args, classifier=classifier, clf_im_size=clf_im_size, devices=cudas)
