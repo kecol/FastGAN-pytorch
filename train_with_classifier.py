@@ -415,7 +415,7 @@ def train(args, classifier, clf_im_size, devices):
         pred_g = netD(fake_images, "fake")        
         # Lreg calculation
         pred_classes_softmax = torch.exp(classifier(fake_images[0]))
-        rho = (pred_classes_softmax.mean(0) / batch_size)
+        rho = pred_classes_softmax.mean(0)
         L_reg = ((rho * torch.log(rho)) / N_dist).mean()
         print('t:', cycle, 'class counter:', C.tolist(), 'N_dist:', N_dist.tolist(), f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}')
         err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
