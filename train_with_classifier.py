@@ -332,7 +332,7 @@ def train(args, classifier, clf_im_size, devices):
 
     avg_param_G = copy_G_params(netG)
 
-    fixed_noise = torch.FloatTensor(8, nz).normal_(0, 1).to(devices[0])
+    fixed_noise = torch.FloatTensor(args.fixed_samples, nz).normal_(0, 1).to(devices[0])
 
     if multi_gpu:
         print('Using models with DataParallel')
@@ -442,7 +442,7 @@ def train(args, classifier, clf_im_size, devices):
             backup_para = copy_G_params(netG)
             load_params(netG, avg_param_G)
             with torch.no_grad():
-                vutils.save_image(netG(fixed_noise)[0].add(1).mul(0.5), saved_image_folder+'/%d.jpg'%iteration, nrow=4)
+                vutils.save_image(netG(fixed_noise)[0].add(1).mul(0.5), saved_image_folder+'/%d.jpg'%iteration, nrow=8)
                 vutils.save_image( torch.cat([
                         F.interpolate(real_image, 128), 
                         rec_img_all, rec_img_small,
@@ -482,6 +482,7 @@ if __name__ == "__main__":
     parser.add_argument('--cycle_steps', type=int, default=10, help='number of iterations between N_distribution updates')
     parser.add_argument('--im_size', type=int, default=256, help='image resolution')
     parser.add_argument('--ckpt', type=str, default='None', help='checkpoint weight path if have one')
+    parser.add_argument('--fixed_samples', type=int, default=8, choices=[8, 16, 24, 32], help='Number of fixed samples to track generator behaviour')    
 
     args = parser.parse_args()
     print(args)
