@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.utils.data.dataloader import DataLoader
 from torchvision import transforms
 from torchvision import utils as vutils
+import numpy as np
 
 import argparse
 from tqdm import tqdm
@@ -20,7 +21,6 @@ percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
 
 #torch.backends.cudnn.benchmark = True
 
-
 def crop_image_by_part(image, part):
     hw = image.shape[2]//2
     if part==0:
@@ -35,7 +35,8 @@ def crop_image_by_part(image, part):
 def train_d(net, data, label="real"):
     """Train function of discriminator"""
     if label=="real":
-        pred, [rec_all, rec_small, rec_part], part = net(data, label)
+        part = np.random.randint(0, 3)
+        pred, [rec_all, rec_small, rec_part] = net(data, label, part)
         err = F.relu(  torch.rand_like(pred) * 0.2 + 0.8 -  pred).mean() + \
             percept( rec_all, F.interpolate(data, rec_all.shape[2]) ).sum() +\
             percept( rec_small, F.interpolate(data, rec_small.shape[2]) ).sum() +\

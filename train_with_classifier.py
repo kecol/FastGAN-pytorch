@@ -309,7 +309,7 @@ def train(args, classifier, clf_im_size, devices):
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-#            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])            
+            #transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])            
         ]
     trans = transforms.Compose(transform_list)
     
@@ -401,7 +401,9 @@ def train(args, classifier, clf_im_size, devices):
                 pass                
             print(f'new cycle t={cycle}')
             # reset counter of classes
-            C = torch.zeros(args.num_classes, device=devices[0])
+            #C = torch.zeros(args.num_classes, device=devices[0])
+            # to avoid zero division
+            C = torch.ones(args.num_classes, device=devices[0])
 
         ## 2. train Discriminator
         netD.zero_grad()
@@ -417,8 +419,8 @@ def train(args, classifier, clf_im_size, devices):
         pred_classes_softmax = torch.exp(classifier(fake_images[0]))
         rho = pred_classes_softmax.mean(0)
         L_reg = ((rho * torch.log(rho)) / N_dist).mean()
-        print('t:', cycle, 'class counter:', C.tolist(), 'N_dist:', N_dist.tolist(), f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}')
         err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
+        print('t:', cycle, 'class counter:', C.tolist(), 'N_dist:', N_dist.tolist(), f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}', f'err_g: {err_g:.4f}')        
 
         err_g.backward()
         optimizerG.step()
