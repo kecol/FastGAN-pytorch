@@ -31,6 +31,11 @@ from diffaug import DiffAugment
 policy = 'color,translation'
 import lpips
 
+#import cv2
+#cv2.setNumThreads(0)
+
+os.environ['OMP_NUM_THREADS'] = '1'
+
 #torch.backends.cudnn.benchmark = True
 
 def train_classifier(model, dataloaders, criterion, optimizer, device, num_epochs=25, is_inception=False):
@@ -427,7 +432,7 @@ def train(gpu, args, classifier, clf_im_size):
         try:
             real_image = next(data_loader)
         except StopIteration as err:
-            print(f'I think is is possible due to splitting the loader in different processes (gpu: {gpu})')
+            #print(f'I think this is possible due to splitting the loader in different processes (gpu: {gpu})')
             continue
 
         #real_image = real_image.cuda(non_blocking=True)
