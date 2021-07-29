@@ -7,16 +7,17 @@ import numpy as np
 import torchvision
 from torchvision import datasets, transforms
 
+import torch.multiprocessing as mp
 import torch.distributed as dist 
-import apex.parallel import DistributedDataParallel
-
-
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 import matplotlib.pyplot as plt
 import time
 import os
 import copy
 import argparse
+
+import copy
 
 
 import torch.nn.functional as F
@@ -29,7 +30,6 @@ from operation import ImageFolder, InfiniteSamplerWrapper
 from diffaug import DiffAugment
 policy = 'color,translation'
 import lpips
-percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
 
 #torch.backends.cudnn.benchmark = True
 
@@ -204,15 +204,15 @@ def tune_classifier(args, classifier, input_size, data_dir, device, batch_size, 
             transforms.RandomResizedCrop(input_size),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])            
-            #transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            #transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])            
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ]),
         'val': transforms.Compose([
             transforms.Resize(input_size),
             transforms.CenterCrop(input_size),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])            
-            #transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            #transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])            
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ]),
     }
 
@@ -265,16 +265,23 @@ def crop_image_by_part(image, part):
     if part==3:
         return image[:,:,hw:,hw:]
 
-def train_d(net, data, label="real"):
+def train_d(net, percept, data, label="real"):
     """Train function of discriminator"""
     if label=="real":
         part = np.random.randint(0, 3)
         pred, [rec_all, rec_small, rec_part] = net(data, label, part)
+
+        #print('TORCH DEVICES:', torch.cuda.current_device())
+        #print('NET', net.device)
+        #print('PERCEPT', percept.gpu_ids)
+
         err = F.relu(  torch.rand_like(pred) * 0.2 + 0.8 -  pred).mean() + \
             percept( rec_all, F.interpolate(data, rec_all.shape[2]) ).sum() +\
             percept( rec_small, F.interpolate(data, rec_small.shape[2]) ).sum() +\
             percept( rec_part, F.interpolate(crop_image_by_part(data, part), rec_part.shape[2]) ).sum()
+        
         err.backward()
+        
         return pred.mean().item(), rec_all, rec_small, rec_part
     else:
         pred = net(data, label)
@@ -298,7 +305,25 @@ but the classifier knows how to classify images of dimension clf_im_size.
 We will need to use one more transform operation to do that.
 IMPORTANT: some image classifiers can work with variable input size like vgg or resnet
 """
-def train(args, classifier, clf_im_size, devices):
+def train(gpu, args, classifier, clf_im_size):
+
+    rank = args.nr * args.gpus + gpu
+    dist.init_process_group(
+    	backend='nccl',
+   		init_method='env://',
+    	world_size=args.world_size,
+    	rank=rank
+    )                                   
+    
+    #torch.manual_seed(0)
+    
+    print('GPU', gpu)
+    torch.cuda.set_device(gpu)
+
+    #percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
+    percept = lpips.PerceptualLoss(model='net-lin', net='vgg', gpu_ids=[gpu])
+    #percept = lpips.LPIPS(net='vgg')
+    #percept.cuda(gpu)
 
     data_root = args.path
     total_iterations = args.iter
@@ -311,7 +336,7 @@ def train(args, classifier, clf_im_size, devices):
     #nlr = 0.0002 # original
     nlr = 0.00002 # diet
     nbeta1 = 0.5
-    multi_gpu = len(devices) > 1
+    #multi_gpu = len(devices) > 1
     dataloader_workers = 8
     current_iteration = 0
     save_interval = 100
@@ -321,16 +346,30 @@ def train(args, classifier, clf_im_size, devices):
             transforms.Resize((int(im_size),int(im_size))),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-            #transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])            
+            #transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])            
         ]
     trans = transforms.Compose(transform_list)
     
-    dataset = ImageFolder(root=data_root, transform=trans)
+    data_dataset = ImageFolder(root=data_root, transform=trans)
 
-    dataloader = iter(DataLoader(dataset, batch_size=batch_size, shuffle=False,
-                      sampler=InfiniteSamplerWrapper(dataset), num_workers=dataloader_workers, pin_memory=True))
-    
+    #dataloader = iter(DataLoader(dataset, batch_size=batch_size, shuffle=False,
+    #                  sampler=InfiniteSamplerWrapper(dataset), num_workers=dataloader_workers, pin_memory=True))
+
+    data_sampler = torch.utils.data.distributed.DistributedSampler(
+    	data_dataset,
+    	num_replicas=args.world_size,
+    	rank=rank
+    )
+    ################################################################
+
+    data_loader = iter(DataLoader(
+       dataset=data_dataset,
+       batch_size=batch_size,
+       shuffle=False,
+       num_workers=0,
+       pin_memory=True,
+       sampler=data_sampler))
     
     #from model_s import Generator, Discriminator
     netG = Generator(ngf=ngf, nz=nz, im_size=im_size)
@@ -339,19 +378,26 @@ def train(args, classifier, clf_im_size, devices):
     netD = Discriminator(ndf=ndf, im_size=im_size)
     netD.apply(weights_init)
 
-    netG.to(devices[0])
-    netD.to(devices[0])
-    classifier.to(devices[0])
+    netG.to(gpu)
+    netD.to(gpu)
+    
+    classifier = copy.deepcopy(classifier)
+    classifier.to(gpu)
 
     avg_param_G = copy_G_params(netG)
 
-    fixed_noise = torch.FloatTensor(args.fixed_samples, nz).normal_(0, 1).to(devices[0])
+    fixed_noise = torch.FloatTensor(args.fixed_samples, nz).normal_(0, 1).to(gpu)
 
-    if multi_gpu:
-        print('Using models with DataParallel')
-        netG = nn.DataParallel(netG, device_ids=devices)
-        netD = nn.DataParallel(netD, device_ids=devices)
-        classifier = nn.DataParallel(classifier, device_ids=devices)
+#    if multi_gpu:
+#        print('Using models with DataParallel')
+#        netG = nn.DataParallel(netG, device_ids=devices)
+#        netD = nn.DataParallel(netD, device_ids=devices)
+#        classifier = nn.DataParallel(classifier, device_ids=devices)
+
+    # Wrap the model
+    netG = DDP(netG, device_ids=[gpu], find_unused_parameters=True)
+    netD = DDP(netD, device_ids=[gpu], find_unused_parameters=True)
+    classifier = DDP(classifier, device_ids=[gpu], find_unused_parameters=True)
 
     optimizerG = optim.Adam(netG.parameters(), lr=nlr, betas=(nbeta1, 0.999))
     optimizerD = optim.Adam(netD.parameters(), lr=nlr, betas=(nbeta1, 0.999))
@@ -374,15 +420,20 @@ def train(args, classifier, clf_im_size, devices):
     cycle_steps = args.cycle_steps
     N_dist = torch.ones(args.num_classes, requires_grad=False) * Na
     N_dist /= N_dist.sum()
-    N_dist = N_dist.to(devices[0])
+    N_dist = N_dist.to(gpu)
     _lambda = args.lreg_lambda
 
     for iteration in tqdm(range(current_iteration, total_iterations+1)):
-        real_image = next(dataloader)
+        try:
+            real_image = next(data_loader)
+        except StopIteration as err:
+            print(f'I think is is possible due to splitting the loader in different processes (gpu: {gpu})')
+            continue
+
         #real_image = real_image.cuda(non_blocking=True)
-        real_image = real_image.to(devices[0], non_blocking=True)
+        real_image = real_image.to(gpu, non_blocking=True)
         current_batch_size = real_image.size(0)
-        noise = torch.Tensor(current_batch_size, nz).normal_(0, 1).to(devices[0])
+        noise = torch.Tensor(current_batch_size, nz).normal_(0, 1).to(gpu)
 
         fake_images = netG(noise)
         # len of fake_images is 2
@@ -412,14 +463,14 @@ def train(args, classifier, clf_im_size, devices):
             # reset counter of classes
             #C = torch.zeros(args.num_classes, device=devices[0])
             # to avoid zero division
-            C = torch.ones(args.num_classes, device=devices[0]) / 100
+            C = torch.ones(args.num_classes, device=gpu) / 100
 
         ## 2. train Discriminator
         netD.zero_grad()
         #classifier.zero_grad()
 
-        err_dr, rec_img_all, rec_img_small, rec_img_part = train_d(netD, real_image, label="real")
-        train_d(netD, [fi.detach() for fi in fake_images], label="fake")
+        err_dr, rec_img_all, rec_img_small, rec_img_part = train_d(netD, percept, real_image, label="real")
+        train_d(netD, percept, [fi.detach() for fi in fake_images], label="fake")
         optimizerD.step()
         
         ## 3. train Generator
@@ -434,7 +485,7 @@ def train(args, classifier, clf_im_size, devices):
                 rho[torch.argmax(rho)] = rho[torch.argmax(rho)]*-0.0001
             L_reg = -(rho / N_dist).sum()
         else:
-            L_reg = ((rho * torch.log(rho)) / N_dist).sum()        
+            L_reg = ((rho * torch.log(rho)) / N_dist).sum()
 
         err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
 
@@ -446,7 +497,7 @@ def train(args, classifier, clf_im_size, devices):
         for j, idx in enumerate(pred_classes_softmax.argmax(1)):
             batch_labels[j, idx] = 1
     
-        batch_labels = batch_labels.to(devices[0])
+        batch_labels = batch_labels.to(gpu)
         # update class counter
         C += batch_labels.sum(0)
 
@@ -463,23 +514,24 @@ def train(args, classifier, clf_im_size, devices):
             backup_para = copy_G_params(netG)
             load_params(netG, avg_param_G)
             with torch.no_grad():
-                vutils.save_image(netG(fixed_noise)[0].add(1).mul(0.5), saved_image_folder+'/%d.jpg'%iteration, nrow=8)
+                vutils.save_image(netG(fixed_noise)[0].add(1).mul(0.5), saved_image_folder+f'/{gpu}_{iteration}.jpg', nrow=8)
                 vutils.save_image( torch.cat([
                         F.interpolate(real_image, 128), 
                         rec_img_all, rec_img_small,
-                        rec_img_part]).add(1).mul(0.5), saved_image_folder+'/rec_%d.jpg'%iteration )
+                        rec_img_part]).add(1).mul(0.5), saved_image_folder+'/{gpu}_rec_{iteration}.jpg')
             load_params(netG, backup_para)
 
         if iteration % (save_interval*50) == 0 or iteration == total_iterations:
             backup_para = copy_G_params(netG)
             load_params(netG, avg_param_G)
-            torch.save({'g':netG.state_dict(),'d':netD.state_dict()}, saved_model_folder+'/%d.pth'%iteration)
-            load_params(netG, backup_para)
-            torch.save({'g':netG.state_dict(),
-                        'd':netD.state_dict(),
-                        'g_ema': avg_param_G,
-                        'opt_g': optimizerG.state_dict(),
-                        'opt_d': optimizerD.state_dict()}, saved_model_folder+'/all_%d.pth'%iteration)
+            if gpu == 0:
+                torch.save({'g':netG.state_dict(),'d':netD.state_dict()}, saved_model_folder+f'/{iteration}.pth')
+                load_params(netG, backup_para)
+                torch.save({'g':netG.state_dict(),
+                            'd':netD.state_dict(),
+                            'g_ema': avg_param_G,
+                            'opt_g': optimizerG.state_dict(),
+                            'opt_d': optimizerD.state_dict()}, saved_model_folder+f'/all_{iteration}.pth')
 
 if __name__ == "__main__":
 
@@ -507,6 +559,12 @@ if __name__ == "__main__":
     parser.add_argument('--diet', type=str, default='False', help='Try to ignore most detected classes gradients')
     parser.add_argument('--clf_loss_classes_weights', type=str, default='',
                 help='classifier cross_entropy_loss weights for classes (example [10, .1, .1] for ferrari, obama, pokemon)')
+
+    parser.add_argument('-n', '--nodes', default=1, type=int, metavar='N')
+    parser.add_argument('-g', '--gpus', default=1, type=int,
+                        help='number of gpus per node')
+    parser.add_argument('-nr', '--nr', default=0, type=int,
+                        help='ranking within the nodes')
 
     args = parser.parse_args()
     print(args)
@@ -547,5 +605,13 @@ if __name__ == "__main__":
     classifier, hist = tune_classifier(args, classifier=classifier, input_size=clf_im_size, data_dir=args.path,
                                             device=cudas[0], batch_size=args.batch_size, num_epochs=args.epochs)
     classifier.eval()
+    classifier.cpu()
 
-    train(args=args, classifier=classifier, clf_im_size=clf_im_size, devices=cudas)
+    #########################################################
+    args.world_size = args.gpus * args.nodes                #
+    os.environ['MASTER_ADDR'] = '127.0.0.1'                 #
+    os.environ['MASTER_PORT'] = '8888'                      #
+    mp.spawn(train, nprocs=args.gpus, args=(args, classifier, clf_im_size))
+    #########################################################    
+
+    #train(gpu=0, args=args, classifier=classifier, clf_im_size=clf_im_size, devices=cudas)
