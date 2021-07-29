@@ -6,6 +6,12 @@ import torch.optim as optim
 import numpy as np
 import torchvision
 from torchvision import datasets, transforms
+
+import torch.distributed as dist 
+import apex.parallel import DistributedDataParallel
+
+
+
 import matplotlib.pyplot as plt
 import time
 import os
@@ -190,7 +196,7 @@ def initialize_classifier(model_name, num_classes, feature_extract, use_pretrain
     return model, input_size
 
 
-def tune_classifier(classifier, input_size, data_dir, device, batch_size, num_epochs):
+def tune_classifier(args, classifier, input_size, data_dir, device, batch_size, num_epochs):
     # Data augmentation and normalization for training
     # Just normalization for validation
     data_transforms = {
@@ -235,7 +241,13 @@ def tune_classifier(classifier, input_size, data_dir, device, batch_size, num_ep
 
 
     # Setup the loss fxn
-    criterion = nn.CrossEntropyLoss()
+    weight = None
+    if len(args.clf_loss_classes_weights) > 0:
+        weight = args.clf_loss_classes_weights
+        for c in '([])': weight = weight.replace(c, '')
+        weight = [float(w) for w in weight.split(',')]
+        weight = torch.tensor(weight).to(device)
+    criterion = nn.CrossEntropyLoss(weight=weight)
     # Train and evaluate
     classifier, hist = train_classifier(classifier, dataloaders_dict, criterion, optimizer, device,
                                 num_epochs=num_epochs, is_inception=(args.classifier.lower()=="inception"))
@@ -283,7 +295,7 @@ def update_discrete_effective_class_distribution(N, C, alpha, beta):
 We added a classifier in the loop to be used for the loss regularizer
 The important thing we need to consider is that G(noise) will generate images of dimension args.im_size
 but the classifier knows how to classify images of dimension clf_im_size.
-TODO: we will need to use one more transform operation to do that.
+We will need to use one more transform operation to do that.
 IMPORTANT: some image classifiers can work with variable input size like vgg or resnet
 """
 def train(args, classifier, clf_im_size, devices):
@@ -296,7 +308,8 @@ def train(args, classifier, clf_im_size, devices):
     ndf = 64
     ngf = 64
     nz = 256
-    nlr = 0.0002
+    #nlr = 0.0002 # original
+    nlr = 0.00002 # diet
     nbeta1 = 0.5
     multi_gpu = len(devices) > 1
     dataloader_workers = 8
@@ -389,13 +402,9 @@ def train(args, classifier, clf_im_size, devices):
                 N_dist = update_discrete_effective_class_distribution(N_dist, C, alpha, beta)
                 print(f'N_dist: {N_dist}')
                 if args.dynamic_lambda.lower() in ['true', '1']:
-                    #
-                    # TODO: recalculate _lambda
                     print('dynamic lambda')
                     # lambda = 1 / sum(e^N)
                     _lambda = 1. / torch.sum(torch.exp(N_dist))
-                else:
-                    print('args.dynamic_lambda:', args.dynamic_lambda)
             else:
                 # we will use first defined N
                 pass                
@@ -403,10 +412,11 @@ def train(args, classifier, clf_im_size, devices):
             # reset counter of classes
             #C = torch.zeros(args.num_classes, device=devices[0])
             # to avoid zero division
-            C = torch.ones(args.num_classes, device=devices[0])
+            C = torch.ones(args.num_classes, device=devices[0]) / 100
 
         ## 2. train Discriminator
         netD.zero_grad()
+        #classifier.zero_grad()
 
         err_dr, rec_img_all, rec_img_small, rec_img_part = train_d(netD, real_image, label="real")
         train_d(netD, [fi.detach() for fi in fake_images], label="fake")
@@ -418,9 +428,15 @@ def train(args, classifier, clf_im_size, devices):
         # Lreg calculation
         pred_classes_softmax = torch.exp(classifier(fake_images[0]))
         rho = pred_classes_softmax.mean(0)
-        L_reg = ((rho * torch.log(rho)) / N_dist).mean()
+        
+        if args.diet.lower() in ['y', 'yes', '1']:
+            for _ in range(args.num_classes-1):
+                rho[torch.argmax(rho)] = rho[torch.argmax(rho)]*-0.0001
+            L_reg = -(rho / N_dist).sum()
+        else:
+            L_reg = ((rho * torch.log(rho)) / N_dist).sum()        
+
         err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
-        print('t:', cycle, 'class counter:', C.tolist(), 'N_dist:', N_dist.tolist(), f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}', f'err_g: {err_g:.4f}')        
 
         err_g.backward()
         optimizerG.step()
@@ -433,6 +449,9 @@ def train(args, classifier, clf_im_size, devices):
         batch_labels = batch_labels.to(devices[0])
         # update class counter
         C += batch_labels.sum(0)
+
+        fmt_counts = [int(c) for c in C.tolist()]
+        print('t:', cycle, 'class counter:', fmt_counts, 'N_dist:', N_dist.tolist(), f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}', f'err_g: {err_g:.4f}') 
 
         for p, avg_p in zip(netG.parameters(), avg_param_G):
             avg_p.mul_(0.999).add_(0.001 * p.data)
@@ -485,6 +504,9 @@ if __name__ == "__main__":
     parser.add_argument('--im_size', type=int, default=256, help='image resolution')
     parser.add_argument('--ckpt', type=str, default='None', help='checkpoint weight path if have one')
     parser.add_argument('--fixed_samples', type=int, default=8, choices=[8, 16, 24, 32], help='Number of fixed samples to track generator behaviour')    
+    parser.add_argument('--diet', type=str, default='False', help='Try to ignore most detected classes gradients')
+    parser.add_argument('--clf_loss_classes_weights', type=str, default='',
+                help='classifier cross_entropy_loss weights for classes (example [10, .1, .1] for ferrari, obama, pokemon)')
 
     args = parser.parse_args()
     print(args)
@@ -522,7 +544,7 @@ if __name__ == "__main__":
     # I don't remember all the classifiers that can handle dynamic image sizes
     # These classifiers are the ones that make use of Average Pooling layer on first layers
     clf_im_size = args.im_size
-    classifier, hist = tune_classifier(classifier=classifier, input_size=clf_im_size, data_dir=args.path,
+    classifier, hist = tune_classifier(args, classifier=classifier, input_size=clf_im_size, data_dir=args.path,
                                             device=cudas[0], batch_size=args.batch_size, num_epochs=args.epochs)
     classifier.eval()
 
