@@ -23,7 +23,7 @@ from operation import ImageFolder, InfiniteSamplerWrapper
 from diffaug import DiffAugment
 policy = 'color,translation'
 import lpips
-percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
+#percept = lpips.PerceptualLoss(model='net-lin', net='vgg', use_gpu=True)
 
 #torch.backends.cudnn.benchmark = True
 
@@ -233,9 +233,16 @@ def tune_classifier(classifier, input_size, data_dir, device, batch_size, num_ep
     # Observe that all parameters are being optimized
     optimizer = optim.SGD(params_to_update, lr=0.001, momentum=0.9)
 
-
     # Setup the loss fxn
-    criterion = nn.CrossEntropyLoss()
+    if len(args.clf_loss_classes_weights) > 0:
+        weight = args.clf_loss_classes_weights
+        for c in '([])': weight = weight.replace(c, '')
+        weight = [float(w) for w in weight.split(',')]
+    else:
+        weight = [1. for _ in range(args.num_classes)]
+
+    weight = torch.tensor(weight).to(device)
+    criterion = nn.CrossEntropyLoss(weight=weight)
     # Train and evaluate
     classifier, hist = train_classifier(classifier, dataloaders_dict, criterion, optimizer, device,
                                 num_epochs=num_epochs, is_inception=(args.classifier.lower()=="inception"))
@@ -287,6 +294,7 @@ TODO: we will need to use one more transform operation to do that.
 IMPORTANT: some image classifiers can work with variable input size like vgg or resnet
 """
 def train(args, classifier, clf_im_size, devices):
+    global percept
 
     data_root = args.path
     total_iterations = args.iter
@@ -296,7 +304,8 @@ def train(args, classifier, clf_im_size, devices):
     ndf = 64
     ngf = 64
     nz = 256
-    nlr = 0.0002
+    nlr = 0.0002 # original from FastGAN
+    #nlr = 0.00002
     nbeta1 = 0.5
     multi_gpu = len(devices) > 1
     dataloader_workers = 8
@@ -319,6 +328,8 @@ def train(args, classifier, clf_im_size, devices):
                       sampler=InfiniteSamplerWrapper(dataset), num_workers=dataloader_workers, pin_memory=True))
     
     
+    percept = lpips.PerceptualLoss(model='net-lin', net='vgg', gpu_ids=[devices[0]])
+
     #from model_s import Generator, Discriminator
     netG = Generator(ngf=ngf, nz=nz, im_size=im_size)
     netG.apply(weights_init)
@@ -339,6 +350,7 @@ def train(args, classifier, clf_im_size, devices):
         netG = nn.DataParallel(netG, device_ids=devices)
         netD = nn.DataParallel(netD, device_ids=devices)
         classifier = nn.DataParallel(classifier, device_ids=devices)
+        percept = nn.DataParallel(percept, device_ids=devices)
 
     optimizerG = optim.Adam(netG.parameters(), lr=nlr, betas=(nbeta1, 0.999))
     optimizerD = optim.Adam(netD.parameters(), lr=nlr, betas=(nbeta1, 0.999))
@@ -363,6 +375,9 @@ def train(args, classifier, clf_im_size, devices):
     N_dist /= N_dist.sum()
     N_dist = N_dist.to(devices[0])
     _lambda = args.lreg_lambda
+
+    log = lambda s: log_to(s, f'train_results/{args.name}/log.txt')
+    log_counting = lambda s: log_to(s, f'train_results/{args.name}/counting.log')
 
     for iteration in tqdm(range(current_iteration, total_iterations+1)):
         real_image = next(dataloader)
@@ -401,7 +416,8 @@ def train(args, classifier, clf_im_size, devices):
                 pass                
             print(f'new cycle t={cycle}')
             # reset counter of classes
-            C = torch.zeros(args.num_classes, device=devices[0])
+            #C = torch.zeros(args.num_classes, device=devices[0])
+            C = torch.ones(args.num_classes, device=devices[0]) * .0001
 
         ## 2. train Discriminator
         netD.zero_grad()
@@ -416,9 +432,24 @@ def train(args, classifier, clf_im_size, devices):
         # Lreg calculation
         pred_classes_softmax = torch.exp(classifier(fake_images[0]))
         rho = pred_classes_softmax.mean(0)
-        L_reg = ((rho * torch.log(rho)) / N_dist).mean()
-        print('t:', cycle, 'class counter:', C.tolist(), 'N_dist:', N_dist.tolist(), f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}')
-        err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
+        L_reg = ((rho * torch.log(rho)) / N_dist).sum()
+        
+        fmt_count = [int(v) for v in C.tolist()]
+        fmt_dist = [round(v, 3) for v in N_dist.tolist()]
+        line = f't: {cycle} class counter: {fmt_count} N_dist: {fmt_dist} _lambda: {_lambda:.4f} L_reg: {L_reg.item():.4f}'
+        print(line)
+        log(line)
+
+        # if end of cycle
+        if (iteration+1) % cycle_steps == 0:
+            fmt_count = [f'{v}' for v in fmt_count]
+            fmt_dist = [f'{v}' for v in fmt_dist]
+            log_counting(f'{cycle},' + ','.join(fmt_count) + ',' + ','.join(fmt_dist))
+        
+        if args.use_lreg.lower() in ['1', 'y', 'yes']:
+            err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
+        else:
+            err_g = -pred_g.mean()
 
         err_g.backward()
         optimizerG.step()
@@ -460,6 +491,11 @@ def train(args, classifier, clf_im_size, devices):
                         'opt_g': optimizerG.state_dict(),
                         'opt_d': optimizerD.state_dict()}, saved_model_folder+'/all_%d.pth'%iteration)
 
+def log_to(s, filename):
+    with open(filename, 'a') as f:
+        if type(s) != list: s = [s]
+        for l in s: f.write(l + '\n')
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Region GAN with help of a classifier')
@@ -483,6 +519,9 @@ if __name__ == "__main__":
     parser.add_argument('--im_size', type=int, default=256, help='image resolution')
     parser.add_argument('--ckpt', type=str, default='None', help='checkpoint weight path if have one')
     parser.add_argument('--fixed_samples', type=int, default=8, choices=[8, 16, 24, 32], help='Number of fixed samples to track generator behaviour')    
+    parser.add_argument('--clf_loss_classes_weights', type=str, default='',
+                help='classifier cross_entropy_loss weights for classes (example [10, .1, .1] for ferrari, obama, pokemon)')    
+    parser.add_argument('--use_lreg', type=str, default='True', help='Use classifier regularizer in generator loss')
 
     args = parser.parse_args()
     print(args)
@@ -511,6 +550,12 @@ if __name__ == "__main__":
         print('The script requires at least one GPU')
         sys.exit(1)
     print(f'Device to be used to fine tune the classifier: {cudas[0]}')
+
+    if not os.path.exists(f'train_results/{args.name}'):
+        os.makedirs(f'train_results/{args.name}')
+    # create new log file
+    open(f'train_results/{args.name}/log.txt', 'w').close()
+    open(f'train_results/{args.name}/counting.log', 'w').close()
 
     # if we use the classifier original input size then later we will require to resize the output of the generator
     # to be able of classifying the images (generator output)
