@@ -368,13 +368,13 @@ def train(gpu, args, classifier, clf_im_size):
     )
     ################################################################
 
-    data_loader = iter(DataLoader(
+    data_loader = DataLoader(
        dataset=data_dataset,
        batch_size=batch_size,
        shuffle=False,
        num_workers=0,
        pin_memory=True,
-       sampler=data_sampler))
+       sampler=data_sampler)
     
     #from model_s import Generator, Discriminator
     netG = Generator(ngf=ngf, nz=nz, im_size=im_size)
@@ -385,9 +385,18 @@ def train(gpu, args, classifier, clf_im_size):
 
     netG.to(gpu)
     netD.to(gpu)
-    
-    classifier = copy.deepcopy(classifier)
+
+    if classifier != None:
+        # we are receiving the classifier as parameter
+        classifier = copy.deepcopy(classifier)
+    else:
+        # we need to load the fine tuned classifier weights
+        feature_extract = args.feature_extract.lower() in ['true', '1']
+        classifier, input_size = initialize_classifier(args.classifier.lower(), args.num_classes, feature_extract, use_pretrained=False)
+        classifier.load_state_dict(torch.load('classifier.pth'))
+
     classifier.to(gpu)
+    classifier.eval()
 
     avg_param_G = copy_G_params(netG)
 
@@ -428,115 +437,124 @@ def train(gpu, args, classifier, clf_im_size):
     N_dist = N_dist.to(gpu)
     _lambda = args.lreg_lambda
 
-    for iteration in tqdm(range(current_iteration, total_iterations+1)):
-        try:
-            real_image = next(data_loader)
-        except StopIteration as err:
-            #print(f'I think this is possible due to splitting the loader in different processes (gpu: {gpu})')
-            continue
+    #for iteration in tqdm(range(current_iteration, total_iterations+1)):
+    iteration = -1    
+    while iteration < args.iter:
+        for real_image in data_loader:
+            if iteration >= args.iter:
+                break
+            iteration += 1
+            #try:
+            #real_image = next(data_loader)
+            #except StopIteration as err:
+            #    print(f'I think this is possible due to splitting the loader in different processes (gpu: {gpu})')
+            #    continue
 
-        #real_image = real_image.cuda(non_blocking=True)
-        real_image = real_image.to(gpu, non_blocking=True)
-        current_batch_size = real_image.size(0)
-        noise = torch.Tensor(current_batch_size, nz).normal_(0, 1).to(gpu)
+            #real_image = real_image.cuda(non_blocking=True)
+            real_image = real_image.to(gpu, non_blocking=True)
+            current_batch_size = real_image.size(0)
+            noise = torch.Tensor(current_batch_size, nz).normal_(0, 1).to(gpu)
 
-        fake_images = netG(noise)
-        # len of fake_images is 2
-        # fake_images[0] should be a tensor of size [batch_size, 3, im_size, im_size]
-        # fake_images[1] should be a tensor of size [batch_size, 3, im_size/2, im_size/2]
+            fake_images = netG(noise)
+            # len of fake_images is 2
+            # fake_images[0] should be a tensor of size [batch_size, 3, im_size, im_size]
+            # fake_images[1] should be a tensor of size [batch_size, 3, im_size/2, im_size/2]
 
-        real_image = DiffAugment(real_image, policy=policy)
-        fake_images = [DiffAugment(fake, policy=policy) for fake in fake_images]
+            real_image = DiffAugment(real_image, policy=policy)
+            fake_images = [DiffAugment(fake, policy=policy) for fake in fake_images]
 
-        if iteration % cycle_steps == 0:
-            # we cycle increment
-            cycle += 1
+            if iteration % cycle_steps == 0:
+                # we cycle increment
+                cycle += 1
 
-            if iteration != current_iteration:
-                # we use previous N discrete class distribution and C to calculate a new N distribution
-                print('update discrete effecting class distribution')
-                N_dist = update_discrete_effective_class_distribution(N_dist, C, alpha, beta)
-                print(f'N_dist: {N_dist}')
-                if args.dynamic_lambda.lower() in ['true', '1']:
-                    print('dynamic lambda')
-                    # lambda = 1 / sum(e^N)
-                    _lambda = 1. / torch.sum(torch.exp(N_dist))
+                if iteration != current_iteration:
+                    # we use previous N discrete class distribution and C to calculate a new N distribution
+                    print('update discrete effecting class distribution')
+                    N_dist = update_discrete_effective_class_distribution(N_dist, C, alpha, beta)
+                    print(f'N_dist: {N_dist}')
+                    if args.dynamic_lambda.lower() in ['true', '1']:
+                        print('dynamic lambda')
+                        # lambda = 1 / sum(e^N)
+                        _lambda = 1. / torch.sum(torch.exp(N_dist))
+                else:
+                    # we will use first defined N
+                    pass                
+                print(f'new cycle t={cycle}')
+                # reset counter of classes
+                #C = torch.zeros(args.num_classes, device=devices[0])
+                # to avoid zero division
+                C = torch.ones(args.num_classes, device=gpu) / 100
+
+            ## 2. train Discriminator
+            netD.zero_grad()
+            #classifier.zero_grad()
+
+            err_dr, rec_img_all, rec_img_small, rec_img_part = train_d(netD, percept, real_image, label="real")
+            train_d(netD, percept, [fi.detach() for fi in fake_images], label="fake")
+            optimizerD.step()
+            
+            ## 3. train Generator
+            netG.zero_grad()
+            pred_g = netD(fake_images, "fake")        
+            # Lreg calculation
+            pred_classes_softmax = torch.exp(classifier(fake_images[0]))
+            rho = pred_classes_softmax.mean(0)
+            
+            if args.diet.lower() in ['y', 'yes', '1']:
+                for _ in range(args.num_classes-1):
+                    rho[torch.argmax(rho)] = rho[torch.argmax(rho)]*-0.0001
+                L_reg = -(rho / N_dist).sum()
             else:
-                # we will use first defined N
-                pass                
-            print(f'new cycle t={cycle}')
-            # reset counter of classes
-            #C = torch.zeros(args.num_classes, device=devices[0])
-            # to avoid zero division
-            C = torch.ones(args.num_classes, device=gpu) / 100
+                L_reg = ((rho * torch.log(rho)) / N_dist).sum()
 
-        ## 2. train Discriminator
-        netD.zero_grad()
-        #classifier.zero_grad()
+            err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
+            # Using just the regularizer raises an error with DPP
+            #err_g = (_lambda / args.num_classes) * L_reg
 
-        err_dr, rec_img_all, rec_img_small, rec_img_part = train_d(netD, percept, real_image, label="real")
-        train_d(netD, percept, [fi.detach() for fi in fake_images], label="fake")
-        optimizerD.step()
+            err_g.backward()
+            optimizerG.step()
+
+            # track of class statistics for later usage with class effective frequency distribution
+            batch_labels = torch.zeros(pred_classes_softmax.shape)
+            for j, idx in enumerate(pred_classes_softmax.argmax(1)):
+                batch_labels[j, idx] = 1
         
-        ## 3. train Generator
-        netG.zero_grad()
-        pred_g = netD(fake_images, "fake")        
-        # Lreg calculation
-        pred_classes_softmax = torch.exp(classifier(fake_images[0]))
-        rho = pred_classes_softmax.mean(0)
-        
-        if args.diet.lower() in ['y', 'yes', '1']:
-            for _ in range(args.num_classes-1):
-                rho[torch.argmax(rho)] = rho[torch.argmax(rho)]*-0.0001
-            L_reg = -(rho / N_dist).sum()
-        else:
-            L_reg = ((rho * torch.log(rho)) / N_dist).sum()
+            batch_labels = batch_labels.to(gpu)
+            # update class counter
+            C += batch_labels.sum(0)
 
-        err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
+            fmt_counts = [int(c) for c in C.tolist()]
+            fmt_dist = [f'{v:.3f}' for v in N_dist.tolist()]
+            print(f'gpu:{gpu}', 't:', cycle, 'class counter:', fmt_counts, 'N_dist:', fmt_dist, f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}', f'err_g: {err_g:.4f}') 
 
-        err_g.backward()
-        optimizerG.step()
+            for p, avg_p in zip(netG.parameters(), avg_param_G):
+                avg_p.mul_(0.999).add_(0.001 * p.data)
 
-        # track of class statistics for later usage with class effective frequency distribution
-        batch_labels = torch.zeros(pred_classes_softmax.shape)
-        for j, idx in enumerate(pred_classes_softmax.argmax(1)):
-            batch_labels[j, idx] = 1
-    
-        batch_labels = batch_labels.to(gpu)
-        # update class counter
-        C += batch_labels.sum(0)
+            if iteration % 100 == 0:
+                print("GAN: loss d: %.5f    loss g: %.5f"%(err_dr, -err_g.item()))
 
-        fmt_counts = [int(c) for c in C.tolist()]
-        print('t:', cycle, 'class counter:', fmt_counts, 'N_dist:', N_dist.tolist(), f'_lambda: {_lambda:.4f}', f'L_reg: {L_reg:.4f}', f'err_g: {err_g:.4f}') 
-
-        for p, avg_p in zip(netG.parameters(), avg_param_G):
-            avg_p.mul_(0.999).add_(0.001 * p.data)
-
-        if iteration % 100 == 0:
-            print("GAN: loss d: %.5f    loss g: %.5f"%(err_dr, -err_g.item()))
-
-        if iteration % (save_interval*10) == 0:
-            backup_para = copy_G_params(netG)
-            load_params(netG, avg_param_G)
-            with torch.no_grad():
-                vutils.save_image(netG(fixed_noise)[0].add(1).mul(0.5), saved_image_folder+f'/{gpu}_{iteration}.jpg', nrow=8)
-                vutils.save_image( torch.cat([
-                        F.interpolate(real_image, 128), 
-                        rec_img_all, rec_img_small,
-                        rec_img_part]).add(1).mul(0.5), saved_image_folder+'/{gpu}_rec_{iteration}.jpg')
-            load_params(netG, backup_para)
-
-        if iteration % (save_interval*50) == 0 or iteration == total_iterations:
-            backup_para = copy_G_params(netG)
-            load_params(netG, avg_param_G)
-            if gpu == 0:
-                torch.save({'g':netG.state_dict(),'d':netD.state_dict()}, saved_model_folder+f'/{iteration}.pth')
+            if iteration % (save_interval*10) == 0:
+                backup_para = copy_G_params(netG)
+                load_params(netG, avg_param_G)
+                with torch.no_grad():
+                    vutils.save_image(netG(fixed_noise)[0].add(1).mul(0.5), saved_image_folder+f'/{gpu}_{iteration}.jpg', nrow=8)
+                    vutils.save_image( torch.cat([
+                            F.interpolate(real_image, 128), 
+                            rec_img_all, rec_img_small,
+                            rec_img_part]).add(1).mul(0.5), saved_image_folder+'/{gpu}_rec_{iteration}.jpg')
                 load_params(netG, backup_para)
-                torch.save({'g':netG.state_dict(),
-                            'd':netD.state_dict(),
-                            'g_ema': avg_param_G,
-                            'opt_g': optimizerG.state_dict(),
-                            'opt_d': optimizerD.state_dict()}, saved_model_folder+f'/all_{iteration}.pth')
+
+            if iteration % (save_interval*50) == 0 or iteration == total_iterations:
+                backup_para = copy_G_params(netG)
+                load_params(netG, avg_param_G)
+                if gpu == 0:
+                    torch.save({'g':netG.state_dict(),'d':netD.state_dict()}, saved_model_folder+f'/{iteration}.pth')
+                    load_params(netG, backup_para)
+                    torch.save({'g':netG.state_dict(),
+                                'd':netD.state_dict(),
+                                'g_ema': avg_param_G,
+                                'opt_g': optimizerG.state_dict(),
+                                'opt_d': optimizerD.state_dict()}, saved_model_folder+f'/all_{iteration}.pth')
 
 if __name__ == "__main__":
 
@@ -611,6 +629,8 @@ if __name__ == "__main__":
                                             device=cudas[0], batch_size=args.batch_size, num_epochs=args.epochs)
     classifier.eval()
     classifier.cpu()
+    torch.save(classifier.state_dict(), 'classifier.pth')
+    classifier = None
 
     #########################################################
     args.world_size = args.gpus * args.nodes                #
