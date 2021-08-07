@@ -486,7 +486,7 @@ def train(args, classifier, clf_im_size, devices):
                         rec_img_part]).add(1).mul(0.5), saved_image_folder+'/rec_%d.jpg'%iteration )
             load_params(netG, backup_para)
 
-        if iteration % (save_interval*100) == 0 or iteration == total_iterations:
+        if iteration % (save_interval*500) == 0 or iteration == total_iterations:
             backup_para = copy_G_params(netG)
             load_params(netG, avg_param_G)
             torch.save({'g':netG.state_dict(),'d':netD.state_dict()}, saved_model_folder+'/%d.pth'%iteration)
@@ -528,6 +528,7 @@ if __name__ == "__main__":
     parser.add_argument('--clf_loss_classes_weights', type=str, default='',
                 help='classifier cross_entropy_loss weights for classes (example [10, .1, .1] for ferrari, obama, pokemon)')    
     parser.add_argument('--use_lreg', type=str, default='True', help='Use classifier regularizer in generator loss')
+    parser.add_argument('--diet', type=str, default='False', help='Try to ignore most detected classes gradients')
 
     args = parser.parse_args()
     print(args)
