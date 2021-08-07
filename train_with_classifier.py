@@ -526,8 +526,9 @@ if __name__ == "__main__":
     parser.add_argument('--ckpt', type=str, default='None', help='checkpoint weight path if have one')
     parser.add_argument('--fixed_samples', type=int, default=8, choices=[8, 16, 24, 32], help='Number of fixed samples to track generator behaviour')    
     parser.add_argument('--clf_loss_classes_weights', type=str, default='',
-                help='classifier cross_entropy_loss weights for classes (example [10, .1, .1] for ferrari, obama, pokemon)')    
+                help='classifier cross_entropy_loss weights for classes (example [10, .1, .1] for ferrari, obama, pokemon)')
     parser.add_argument('--use_lreg', type=str, default='True', help='Use classifier regularizer in generator loss')
+    parser.add_argument('--diet', type=str, default='False', help='Try to ignore most detected classes gradients')
 
     args = parser.parse_args()
     print(args)
