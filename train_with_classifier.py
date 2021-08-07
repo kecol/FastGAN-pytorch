@@ -436,9 +436,9 @@ def train(args, classifier, clf_im_size, devices):
         if args.diet.lower() in ['y', 'yes', '1']:
             for _ in range(args.num_classes-1):
                     rho[torch.argmax(rho)] = rho[torch.argmax(rho)]*-0.0001
-            L_reg = -(rho / N_dist).sum()
+            L_reg = -(rho / N_dist).mean()
         else:
-            L_reg = ((rho * torch.log(rho)) / N_dist).sum()
+            L_reg = ((rho * torch.log(rho)) / N_dist).mean()
         
         # if end of cycle
         if (iteration+1) % cycle_steps == 0:
