@@ -432,7 +432,13 @@ def train(args, classifier, clf_im_size, devices):
         # Lreg calculation
         pred_classes_softmax = torch.exp(classifier(fake_images[0]))
         rho = pred_classes_softmax.mean(0)
-        L_reg = ((rho * torch.log(rho)) / N_dist).sum()
+
+        if args.diet.lower() in ['y', 'yes', '1']:
+            for _ in range(args.num_classes-1):
+                    rho[torch.argmax(rho)] = rho[torch.argmax(rho)]*-0.0001
+            L_reg = -(rho / N_dist).sum()
+        else:
+            L_reg = ((rho * torch.log(rho)) / N_dist).sum()
         
         fmt_count = [int(v) for v in C.tolist()]
         fmt_dist = [round(v, 3) for v in N_dist.tolist()]
@@ -480,7 +486,7 @@ def train(args, classifier, clf_im_size, devices):
                         rec_img_part]).add(1).mul(0.5), saved_image_folder+'/rec_%d.jpg'%iteration )
             load_params(netG, backup_para)
 
-        if iteration % (save_interval*50) == 0 or iteration == total_iterations:
+        if iteration % (save_interval*100) == 0 or iteration == total_iterations:
             backup_para = copy_G_params(netG)
             load_params(netG, avg_param_G)
             torch.save({'g':netG.state_dict(),'d':netD.state_dict()}, saved_model_folder+'/%d.pth'%iteration)
