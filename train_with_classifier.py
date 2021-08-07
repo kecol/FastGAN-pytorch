@@ -440,14 +440,13 @@ def train(args, classifier, clf_im_size, devices):
         else:
             L_reg = ((rho * torch.log(rho)) / N_dist).sum()
         
-        fmt_count = [int(v) for v in C.tolist()]
-        fmt_dist = [round(v, 3) for v in N_dist.tolist()]
-        line = f't: {cycle} class counter: {fmt_count} N_dist: {fmt_dist} _lambda: {_lambda:.4f} L_reg: {L_reg.item():.4f}'
-        print(line)
-        log(line)
-
         # if end of cycle
         if (iteration+1) % cycle_steps == 0:
+            fmt_count = [int(v) for v in C.tolist()]
+            fmt_dist = [round(v, 3) for v in N_dist.tolist()]
+            line = f't: {cycle} class counter: {fmt_count} N_dist: {fmt_dist} _lambda: {_lambda:.4f} L_reg: {L_reg.item():.4f}'
+            print(line)
+            log(line)
             fmt_count = [f'{v}' for v in fmt_count]
             fmt_dist = [f'{v}' for v in fmt_dist]
             log_counting(f'{cycle},' + ','.join(fmt_count) + ',' + ','.join(fmt_dist))
