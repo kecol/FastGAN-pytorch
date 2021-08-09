@@ -403,7 +403,7 @@ def train(args, classifier, clf_im_size, devices):
                 print('update discrete effecting class distribution')
                 N_dist = update_discrete_effective_class_distribution(N_dist, C, alpha, beta)
                 print(f'N_dist: {N_dist}')
-                if args.dynamic_lambda.lower() in ['true', '1']:
+                if args.dynamic_lambda.lower() in ['true', 'yes', 'y', '1']:
                     #
                     # TODO: recalculate _lambda
                     print('dynamic lambda')
@@ -433,7 +433,7 @@ def train(args, classifier, clf_im_size, devices):
         pred_classes_softmax = torch.exp(classifier(fake_images[0]))
         rho = pred_classes_softmax.mean(0)
 
-        if args.diet.lower() in ['y', 'yes', '1']:
+        if args.diet.lower() in ['true', 'y', 'yes', '1']:
             for _ in range(args.num_classes-1):
                     rho[torch.argmax(rho)] = rho[torch.argmax(rho)]*-0.0001
             L_reg = -(rho / N_dist).mean()
@@ -451,7 +451,7 @@ def train(args, classifier, clf_im_size, devices):
             fmt_dist = [f'{v}' for v in fmt_dist]
             log_counting(f'{cycle},' + ','.join(fmt_count) + ',' + ','.join(fmt_dist))
         
-        if args.use_lreg.lower() in ['1', 'y', 'yes']:
+        if args.use_lreg.lower() in ['1', 'y', 'yes', 'true']:
             err_g = -pred_g.mean() + (_lambda / args.num_classes) * L_reg
         else:
             err_g = -pred_g.mean()
@@ -536,7 +536,7 @@ if __name__ == "__main__":
     print(f"Torchvision Version: {torchvision.__version__}")
 
     # Initialize the model for this run
-    feature_extract = args.feature_extract.lower() in ['true', '1']
+    feature_extract = args.feature_extract.lower() in ['true', 'yes', 'y', '1']
     classifier, input_size = initialize_classifier(args.classifier.lower(), args.num_classes, feature_extract, use_pretrained=True)
 
     # Print the model we just instantiated
